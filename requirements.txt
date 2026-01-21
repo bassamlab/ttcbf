@@ -1,0 +1,10 @@
+numpy==1.24.4
+scipy==1.14.1
+matplotlib==3.9.2
+cvxpy==1.5.3
+clarabel==0.9.0
+ecos==2.0.14
+osqp==0.6.7.post3
+scs==3.2.7
+qdldl==0.1.7.post4
+tqdm==4.67.1

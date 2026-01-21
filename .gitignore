@@ -127,6 +127,21 @@ ipch/
 *.VC.db
 *.VC.VC.opendb
 
+
+### macOS ###
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+### VisualStudioCode ###
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
 # Visual Studio profiler
 *.psess
 *.vsp
