@@ -1,5 +1,26 @@
 # TTCBF: A Truncated Taylor Control Barrier Function for High-Order Safety Constraints
+![Python](https://img.shields.io/badge/python-3.11-blue.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/bassamlab/ttcbf/blob/main/LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2408.07644-b31b1b.svg)](https://arxiv.org/abs/2601.15196)
+
 **Abstract**: Control Barrier Functions (CBFs) enforce safety by rendering a prescribed safe set forward invariant. However, standard CBFs are limited to safety constraints with relative degree one, while High-Order CBF (HOCBF) methods address higher relative degree at the cost of introducing a chain of auxiliary functions and multiple class K functions whose tuning scales with the relative degree. In this paper, we introduce a Truncated Taylor Control Barrier Function (TTCBF), which generalizes standard discrete-time CBFs to consider high-order safety constraints and requires only one class K function, independent of the relative degree. We also propose an adaptive variant, adaptive TTCBF (aTTCBF), that optimizes an online gain on the class K function to improve adaptability, while requiring fewer control design parameters than existing adaptive HOCBF variants. Numerical experiments in a relative-degree-six spring-mass system and a cluttered corridor navigation validate the above theoretical findings.
+
+## Install
+- Requirements
+  - Python 3.11 (other versions may also work)
+  - All required Python packages are listed in `requirements.txt`
+
+- Create a Virtual Environment (Recommended)
+  ```bash
+  # Create environment
+  conda create -n ttcbf python=3.11 -y
+
+  # Activate environment
+  conda activate ttcbf
+
+  # Install dependencies
+  pip install -r requirements.txt
+  ```
 
 ## How to Use
 - For the spring-mass system, run `run_spring_mass.py`, or run `plot_spring_mass.py` directly using the saved data.
