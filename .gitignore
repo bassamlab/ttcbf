@@ -10,6 +10,8 @@
 *.userosscache
 *.sln.docstates
 *.env
+*.pdf
+tmp/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -135,7 +137,7 @@ ipch/
 .LSOverride
 
 ### VisualStudioCode ###
-.vscode/*
+.vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
