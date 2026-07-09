@@ -12,6 +12,7 @@
 *.env
 *.pdf
 tmp/
+eval_results_accel*
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
