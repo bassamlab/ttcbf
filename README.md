@@ -1,4 +1,4 @@
-# TTCBF: A Truncated Taylor Control Barrier Function for High-Order Safety Constraints
+# TTCBF: A Sampled-Time Truncated Taylor Control Barrier Function for High-Order Safety Constraints
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/bassamlab/ttcbf/blob/main/LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2408.07644-b31b1b.svg)](https://arxiv.org/abs/2601.15196)
