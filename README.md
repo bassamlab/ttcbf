@@ -18,6 +18,9 @@ conda activate ttcbf
 python -m pip install -r requirements.txt
 ```
 
+<details>
+<summary><strong>MP4 export requirements</strong></summary>
+
 MP4 export is optional and requires [FFmpeg](https://ffmpeg.org/) on the system path:
 
 ```bash
@@ -31,11 +34,12 @@ sudo apt-get install ffmpeg
 winget install --id Gyan.FFmpeg -e
 ```
 
+</details>
 
-## Reproducing the results
+## Reproducing the evaluation results
 The manuscript results were generated on an Apple M2 Pro with 16 GB of RAM. The simulation outputs are deterministic within normal solver tolerances, but reported wall-clock runtimes depend on the hardware and current system load.
 
-### Default control bound
+### 1. Default control bound
 
 Run all 12 methods with the default control bounds:
 
@@ -47,7 +51,7 @@ Results are written to `eval_results_accel_min-1/`. Under these bounds, TTCBF, a
 
 <!-- TODO: Add figure eval_results_accel_min-1.5/fig_xy_trajectories.pdf -->
 
-### Enlarged control bound
+### 2. Enlarged control bound
 
 Reproduce the comparison with an enlarged deceleration bound set to `-1.5 m/s^2`:
 
@@ -57,7 +61,7 @@ python main.py --accel-min -1.5
 
 The default output directory is `eval_results_accel_min-1.5/`.
 
-### Tightened control bounds
+### 3. Tightened control bounds
 
 Reproduce the manuscript's 400 control-bound combinations for the six adaptive methods:
 
@@ -69,9 +73,9 @@ This evaluates 20 braking bounds and 20 negative yaw-rate bounds, for 2,400 roll
 
 ## Number of tuning parameters
 
-The manuscript counts user-chosen safety-constraint parameters, auxiliary dynamics parameters, and associated QP weights; goal-oriented CLF parameters are excluded.
+The manuscript counts user-chosen safety-constraint parameters, auxiliary dynamics parameters, and associated QP weights. Goal-oriented CLF parameters are excluded.
 
-| Method | Count | Main source of tuning parameters |
+| Method | Count | Justification |
 | --- | ---: | --- |
 | TTCBF (our) | **1** | One class-K coefficient |
 | aTTCBF (our) | **1** | One adaptive-gain penalty weight |
@@ -86,12 +90,13 @@ The manuscript counts user-chosen safety-constraint parameters, auxiliary dynami
 | ET-TLC | 3 | Time step and event-triggering state bounds |
 | ET-aTLC | 4 | Time-scale bounds, look-ahead horizon, and state bounds |
 
-TTCBF and aTTCBF retain one tuning parameter independently of the safety constraint's relative degree; recursive-chain constructions require additional class-K functions as the relative degree increases.
+TTCBF and aTTCBF retain one tuning parameter independently of the safety constraint's relative degree. Recursive-chain-based methods require additional class-K functions as the relative degree increases. All adaptive methods, except for our aTTCBF, requre more tuning parameters compared to their nonadaptive counterparts.
 
 
 ## Notes
 
-## Experiment overview
+<details>
+<summary><strong>Experiment overview</strong></summary>
 
 The simulated vehicle has state `[p_x, p_y, theta, v]` and control `[u_1, u_2]`, where `u_1` is yaw rate and `u_2` is acceleration. The default experiment uses:
 
@@ -106,7 +111,10 @@ The simulated vehicle has state `[p_x, p_y, theta, v]` and control `[u_1, u_2]`,
 
 All method implementations and parameter values used for the manuscript are self-contained in [`main.py`](main.py).
 
-## Outputs and caching
+</details>
+
+<details>
+<summary><strong>Outputs and caching</strong></summary>
 
 A standard run produces:
 
@@ -122,7 +130,10 @@ When `--save-video` is supplied, the run also produces `video_xy_trajectories.mp
 
 Grid sweeps produce `grid_sweep_rollouts.csv` and `grid_sweep_method_summary.csv`. Delete an output directory or pass `--no-reuse-cache` when a completely fresh run is required. Cache compatibility accounts for shared scenario settings and method-specific parameters.
 
-### Run selected methods without cached baselines
+</details>
+
+<details>
+<summary><strong>Run selected methods without cached baselines</strong></summary>
 
 Use `--methods` with `--no-reuse-cache` to simulate only selected methods:
 
@@ -135,7 +146,10 @@ python main.py \
 
 Without `--no-reuse-cache`, compatible cached baselines in the output directory are included in the comparison. Requested methods are always recomputed; missing or stale baseline caches are simulated automatically.
 
-### Export a trajectory video
+</details>
+
+<details>
+<summary><strong>Export a trajectory video</strong></summary>
 
 Add `--save-video` to a single-scenario run:
 
@@ -145,7 +159,10 @@ python main.py --save-video
 
 After simulation and cache loading are complete, the script exports `video_xy_trajectories.mp4`. The video supports fully cached, fully fresh, and mixed result sets, and uses the same trajectory styles and inset view as `fig_xy_trajectories.pdf`. Its legend is placed above the plotting frame. Each colored triangle shows vehicle heading, while the short line extending ahead of it has length proportional to speed normalized by the configured speed bounds. Video export is intentionally unavailable for grid sweeps.
 
-### Override scenario or method parameters
+</details>
+
+<details>
+<summary><strong>Override scenario or method parameters</strong></summary>
 
 Use repeatable `--set NAME=VALUE` arguments for fields defined by `Scenario`:
 
@@ -158,7 +175,7 @@ python main.py \
 
 The dedicated `--accel-min` option is equivalent to setting `accel_min` and takes precedence when both forms are supplied. Run `python main.py --help` for the complete command-line interface.
 
-
+</details>
 
 ## Citation
 
