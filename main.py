@@ -22,6 +22,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import time
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -46,15 +47,17 @@ SINGLE_COLUMN_WIDTH = 3.4
 PLOT_SIZE = (SINGLE_COLUMN_WIDTH, 2.4)
 PLOT_TWO_PANEL_SIZE = (SINGLE_COLUMN_WIDTH, 1.6)
 PLOT_TRAJECTORY_SIZE = (SINGLE_COLUMN_WIDTH, 3.0)
-PLOT_TRAJECTORY_VIDEO_SIZE = (SINGLE_COLUMN_WIDTH, 2.1)
 SAVEFIG_PAD_INCHES = 0.02
 IS_ADD_ALL_METHOD_LEGEND = False
 REFERENCE_LINEWIDTH = 1.0
 SOLVER_FALLBACK_MARKER_SIZE = 20.0
 COLLISION_OR_FINAL_MARKER_SIZE = 20.0
 START_GOAL_MARKER_SIZE = 40.0
-VIDEO_DPI = 180
+VIDEO_DPI = 300
 VIDEO_FINAL_HOLD_SECONDS = 1.0
+VIDEO_LEGEND_COLUMNS = 4
+VIDEO_LEGEND_ROW_HEIGHT = 0.18
+VIDEO_PLOT_HEIGHT = 2.1
 VIDEO_VEHICLE_MARKER_SIZE = 5.0
 GOAL_REACHED_TOLERANCE = 0.1
 COLLISION_H_TOLERANCE = 1.0e-6
@@ -159,6 +162,7 @@ def save_paper_figure(fig: plt.Figure, path: Path | str) -> Path:
         pad_inches=SAVEFIG_PAD_INCHES,
     )
     plt.close(fig)
+    print(f"Wrote fig: {os.path.relpath(output.resolve(), Path.cwd())}")
     return output
 
 
@@ -1008,15 +1012,22 @@ def should_add_method_legend(
     return IS_ADD_ALL_METHOD_LEGEND or not is_all_methods_result_set(results)
 
 
+def method_legend_handles(
+    methods: tuple[str, ...],
+    labels: list[str],
+) -> list[Line2D]:
+    return [
+        Line2D([0.0], [0.0], label=label, **method_plot_kwargs({"method": method}))
+        for method, label in zip(methods, labels, strict=True)
+    ]
+
+
 def save_method_legend_figure(
     methods: tuple[str, ...],
     labels: list[str],
     out_dir: Path,
 ) -> None:
-    handles = [
-        Line2D([0.0], [0.0], label=label, **method_plot_kwargs({"method": method}))
-        for method, label in zip(methods, labels, strict=True)
-    ]
+    handles = method_legend_handles(methods, labels)
     ncol = legend_column_count(labels)
     nrows = max(1, math.ceil(len(labels) / ncol))
     fig = plt.figure(figsize=(SINGLE_COLUMN_WIDTH, 0.20 + 0.22 * nrows))
@@ -1464,6 +1475,27 @@ def print_progress(
         f"step {step:4d}/{total:<4d} sim {sim_time:4.1f}s elapsed {elapsed:4.1f}s"
     )
     print(message, end="\n" if force_newline else "", flush=True)
+
+
+def print_video_export_progress(
+    completed_frames: int,
+    total_frames: int,
+    start_time: float,
+) -> None:
+    width = 28
+    fraction = 1.0 if total_frames <= 0 else min(
+        max(completed_frames / total_frames, 0.0),
+        1.0,
+    )
+    filled = int(round(width * fraction))
+    bar = "#" * filled + "-" * (width - filled)
+    elapsed = time.perf_counter() - start_time
+    print(
+        f"\rExporting video |{bar}| {100.0 * fraction:4.1f}% "
+        f"frame {completed_frames:4d}/{total_frames:<4d} elapsed {elapsed:4.1f}s",
+        end="",
+        flush=True,
+    )
 
 
 def wrap_angle(angle: float) -> float:
@@ -3521,7 +3553,11 @@ def save_composite_results_plot(
     save_paper_figure(fig, out_dir / "fig_composite_results.pdf")
 
 
-def save_plots(results: list[dict[str, np.ndarray | str | int | float]], scenario: Scenario, out_dir: Path) -> None:
+def save_plots(
+    results: list[dict[str, np.ndarray | str | int | float]],
+    scenario: Scenario,
+    out_dir: Path,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fig, ax = new_paper_figure(figsize=(SINGLE_COLUMN_WIDTH, 1.0), constrained_layout=False)
@@ -3995,6 +4031,40 @@ def add_trajectory_legend(
         )
 
 
+def add_trajectory_video_legend(
+    fig: plt.Figure,
+    results: list[dict[str, np.ndarray | str | int | float]],
+    scenario: Scenario,
+) -> None:
+    methods = tuple(str(result["method"]) for result in results)
+    labels = [result_legend_label(result, scenario) for result in results]
+    handles = method_legend_handles(methods, labels)
+    ncol = max(1, min(VIDEO_LEGEND_COLUMNS, len(labels)))
+    nrows = max(1, math.ceil(len(labels) / ncol))
+    requested_height = VIDEO_PLOT_HEIGHT + VIDEO_LEGEND_ROW_HEIGHT * nrows
+    height_pixels = 2 * math.ceil(requested_height * VIDEO_DPI / 2.0)
+    figure_height = height_pixels / VIDEO_DPI
+    axes_bottom = 0.11 + 0.03 * nrows
+    axes_height = 1.64 / figure_height
+    fig.set_size_inches(SINGLE_COLUMN_WIDTH, figure_height)
+    fig.subplots_adjust(
+        left=0.13,
+        right=0.97,
+        bottom=axes_bottom,
+        top=min(0.92, axes_bottom + axes_height),
+    )
+    fig.legend(
+        handles=handles,
+        labels=labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.99),
+        ncol=ncol,
+        borderaxespad=0.0,
+        columnspacing=0.8,
+        handlelength=1.8,
+    )
+
+
 def add_trajectory_inset(ax: plt.Axes, scenario: Scenario) -> plt.Axes:
     axins = inset_axes(
         ax,
@@ -4109,19 +4179,21 @@ def save_trajectory_video(
     if not animation.writers.is_available("ffmpeg"):
         raise RuntimeError(
             "FFmpeg is required for --save-video. Install it with "
-            "'brew install ffmpeg' on macOS or 'sudo apt-get install ffmpeg' on Ubuntu."
+            "'brew install ffmpeg' on macOS, 'sudo apt-get install ffmpeg' on "
+            "Ubuntu, or 'winget install --id Gyan.FFmpeg -e' on Windows."
         )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     output = out_dir / "video_xy_trajectories.mp4"
     fig, ax = new_trajectory_figure(scenario)
-    if not should_add_method_legend(results):
-        fig.set_size_inches(*PLOT_TRAJECTORY_VIDEO_SIZE)
+    add_trajectory_video_legend(fig, results, scenario)
 
     main_lines: list[Line2D] = []
     inset_lines: list[Line2D] = []
     main_vehicles: list[Line2D] = []
     inset_vehicles: list[Line2D] = []
+    main_speed_indicators: list[Line2D] = []
+    inset_speed_indicators: list[Line2D] = []
     status_artists: list[list[plt.Artist]] = []
     result_states: list[np.ndarray] = []
     result_times: list[np.ndarray] = []
@@ -4158,9 +4230,19 @@ def save_trajectory_video(
             label="_nolegend_",
         )
         main_vehicles.append(vehicle)
+        (speed_indicator,) = ax.plot(
+            [],
+            [],
+            color=color,
+            linestyle="-",
+            linewidth=1.3,
+            solid_capstyle="round",
+            zorder=34,
+            label="_nolegend_",
+        )
+        main_speed_indicators.append(speed_indicator)
         status_artists.append(hidden_trajectory_status_artists(ax, result, scenario))
 
-    add_trajectory_legend(fig, ax, results)
     axins = add_trajectory_inset(ax, scenario)
     for result, states in zip(results, result_states, strict=True):
         (line,) = axins.plot([], [], **method_plot_kwargs(result))
@@ -4179,6 +4261,17 @@ def save_trajectory_video(
             label="_nolegend_",
         )
         inset_vehicles.append(vehicle)
+        (speed_indicator,) = axins.plot(
+            [],
+            [],
+            color=color,
+            linestyle="-",
+            linewidth=1.3,
+            solid_capstyle="round",
+            zorder=34,
+            label="_nolegend_",
+        )
+        inset_speed_indicators.append(speed_indicator)
 
     inset_status_artists = [
         hidden_trajectory_status_artists(axins, result, scenario)
@@ -4191,6 +4284,10 @@ def save_trajectory_video(
     )
     for annotation in annotations.values():
         annotation.set_visible(False)
+
+    speed_scale = max(abs(scenario.v_min), abs(scenario.v_max), 1.0e-12)
+    main_speed_max_length = 0.05 * abs(ax.get_xlim()[1] - ax.get_xlim()[0])
+    inset_speed_max_length = 0.12 * abs(axins.get_xlim()[1] - axins.get_xlim()[0])
 
     max_time = max(float(times[-1]) for times in result_times)
     frame_times = np.arange(0.0, max_time + 0.5 * scenario.dt, scenario.dt)
@@ -4208,6 +4305,8 @@ def save_trajectory_video(
         *inset_lines,
         *main_vehicles,
         *inset_vehicles,
+        *main_speed_indicators,
+        *inset_speed_indicators,
         *all_status_artists,
         *annotations.values(),
     ]
@@ -4227,6 +4326,21 @@ def save_trajectory_video(
             for vehicle in (main_vehicles[index], inset_vehicles[index]):
                 vehicle.set_data([current_state[0]], [current_state[1]])
                 vehicle.set_marker(marker)
+
+            speed_ratio = float(np.clip(abs(current_state[3]) / speed_scale, 0.0, 1.0))
+            direction = np.array(
+                [math.cos(current_state[2]), math.sin(current_state[2])],
+                dtype=float,
+            )
+            for speed_indicator, max_length in (
+                (main_speed_indicators[index], main_speed_max_length),
+                (inset_speed_indicators[index], inset_speed_max_length),
+            ):
+                endpoint = current_state[:2] + speed_ratio * max_length * direction
+                speed_indicator.set_data(
+                    [current_state[0], endpoint[0]],
+                    [current_state[1], endpoint[1]],
+                )
 
             show_status = frame_time >= result_stop_time(result) - 0.5 * scenario.dt
             for artist in (*status_artists[index], *inset_status_artists[index]):
@@ -4253,9 +4367,22 @@ def save_trajectory_video(
         metadata={"title": "TTCBF trajectory comparison"},
         extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
     )
+    video_frame_count = len(frame_times)
+    export_started_at = time.perf_counter()
     try:
-        trajectory_animation.save(output, writer=writer, dpi=VIDEO_DPI)
+        print_video_export_progress(0, video_frame_count, export_started_at)
+        trajectory_animation.save(
+            output,
+            writer=writer,
+            dpi=VIDEO_DPI,
+            progress_callback=lambda frame_number, _: print_video_export_progress(
+                frame_number + 1,
+                video_frame_count,
+                export_started_at,
+            ),
+        )
     finally:
+        print()
         plt.close(fig)
     return output
 
@@ -4386,98 +4513,32 @@ def print_summary(
     results: list[dict[str, np.ndarray | str | int | float]],
     scenario: Scenario,
 ) -> None:
-    print("\nStatic obstacle comparison summary")
-    print("-" * 158)
+    print("\nComparison summary")
     header = (
-        f"{'method':<24} {'stop':>15} {'t stop':>7} {'min h':>10} {'updates':>9} {'QP calls':>9} "
-        f"{'tick ms':>9} {'update ms':>10} {'QP ms/call':>11} "
-        f"{'total s':>9} {'RTF':>9} {'max upd ms':>11} {'infeas':>7}"
+        f"{'method':<12} {'stop':<17} {'t stop [s]':>10} {'min h':>7} {'updates':>7} {'QP calls':>8} "
+        f"{'tick [ms]':>9} {'upd [ms]':>8} {'QP/call [ms]':>12} "
+        f"{'total [s]':>9} {'RTF':>6} {'max [ms]':>8} {'infeas':>6}"
     )
+    print("-" * len(header))
     print(header)
-    print("-" * 158)
+    print("-" * len(header))
     for result in results:
         metrics = timing_metrics(result, scenario)
         print(
-            f"{result['label']:<24} "
-            f"{result_stop_reason(result):>15} "
-            f"{result_stop_time(result):>7.2f} "
-            f"{float(np.min(result['h_values'])):>10.4f} "
-            f"{int(metrics['num_controller_updates']):>9d} "
-            f"{int(metrics['num_qp_calls']):>9d} "
-            f"{float(metrics['mean_step_compute_ms']):>9.3f} "
-            f"{float(metrics['mean_update_compute_ms']):>10.3f} "
-            f"{float(metrics['mean_qp_call_compute_ms']):>11.3f} "
-            f"{float(metrics['total_controller_compute_s']):>9.3f} "
-            f"{float(metrics['controller_real_time_factor']):>9.3g} "
-            f"{float(metrics['max_update_compute_ms']):>11.3f} "
-            f"{int(result['num_infeasible']):>7d}"
+            f"{result['label']:<12} "
+            f"{result_stop_reason(result):<17} "
+            f"{result_stop_time(result):>10.2f} "
+            f"{float(np.min(result['h_values'])):>7.4f} "
+            f"{int(metrics['num_controller_updates']):>7d} "
+            f"{int(metrics['num_qp_calls']):>8d} "
+            f"{float(metrics['mean_step_compute_ms']):>9.2f} "
+            f"{float(metrics['mean_update_compute_ms']):>8.2f} "
+            f"{float(metrics['mean_qp_call_compute_ms']):>12.2f} "
+            f"{float(metrics['total_controller_compute_s']):>9.2f} "
+            f"{float(metrics['controller_real_time_factor']):>6.3g} "
+            f"{float(metrics['max_update_compute_ms']):>8.2f} "
+            f"{int(result['num_infeasible']):>6d}"
         )
-    print("\nQP status counts")
-    for result in results:
-        print(f"  {result['label']}: {status_counts_json(np.asarray(result['qp_call_statuses']))}")
-
-
-def print_timing_interpretation(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    scenario: Scenario,
-) -> None:
-    metrics_by_label = {
-        str(result["label"]): timing_metrics(result, scenario)
-        for result in results
-    }
-    min_h_by_label = {
-        str(result["label"]): float(np.min(result["h_values"]))
-        for result in results
-    }
-
-    total_rank = sorted(
-        metrics_by_label,
-        key=lambda label: float(metrics_by_label[label]["total_controller_compute_s"]),
-    )
-    update_rank = sorted(
-        metrics_by_label,
-        key=lambda label: float(metrics_by_label[label]["mean_update_compute_ms"]),
-    )
-    qp_rank = sorted(
-        metrics_by_label,
-        key=lambda label: float(metrics_by_label[label]["num_qp_calls"]),
-    )
-    unsafe_labels = [label for label, min_h in min_h_by_label.items() if min_h < 0.0]
-
-    print("\nTiming interpretation")
-    print("-" * 132)
-    print(
-        "The per fixed tick mean is the average controller cost seen by a fixed-rate "
-        "monitor running at the simulation step size."
-    )
-    print(
-        "The per controller update mean omits intervals without a new QP solve, so it compares "
-        "the cost of recomputing a new control input."
-    )
-    print(
-        "The QP call count is reported separately because Event-triggered TLC uses a "
-        "preliminary QP plus an event QP at each update, and Event-triggered aTLC repeats "
-        "that process for every candidate time scale."
-    )
-    print(
-        "By total controller wall time over each method's actual simulated duration, "
-        f"{total_rank[0]} is the lightest method and {total_rank[-1]} is the heaviest method."
-    )
-    print(
-        f"By computation cost conditional on an actual controller update, "
-        f"{update_rank[0]} has the smallest mean update time and {update_rank[-1]} has the largest mean update time."
-    )
-    print(
-        f"By the number of QP calls, {qp_rank[0]} uses the fewest QP calls and "
-        f"{qp_rank[-1]} uses the most QP calls."
-    )
-    if unsafe_labels:
-        print(
-            "The methods with negative minimum barrier values in this run are "
-            f"{', '.join(unsafe_labels)}, so their timing should not be interpreted as a "
-            "successful safe-control comparison without also reporting the safety violation."
-        )
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -4711,14 +4772,17 @@ def main() -> None:
         if not group_results:
             continue
         save_plots(group_results, scenario, group_out_dir)
+
     if args.save_video:
         try:
             video_path = save_trajectory_video(results, scenario, out_dir)
         except (RuntimeError, ValueError) as exc:
             raise SystemExit(f"error: {exc}") from exc
-        print(f"Wrote trajectory video to: {video_path.resolve()}")
+        print(
+            "Wrote trajectory video to: "
+            f"{os.path.relpath(video_path.resolve(), Path.cwd())}"
+        )
     print_summary(results, scenario)
-    print_timing_interpretation(results, scenario)
     print(f"\nWrote plots and logs to: {out_dir.resolve()}")
 
 
