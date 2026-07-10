@@ -1,58 +1,229 @@
 # TTCBF: A Sampled-Time Truncated Taylor Control Barrier Function for High-Order Safety Constraints
-![Python](https://img.shields.io/badge/python-3.11-blue.svg)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/bassamlab/ttcbf/blob/main/LICENSE)
-[![arXiv](https://img.shields.io/badge/arXiv-2408.07644-b31b1b.svg)](https://arxiv.org/abs/2601.15196)
 
-**Abstract**: Control Barrier Functions (CBFs) enforce safety by rendering a prescribed safe set forward invariant, typically at the controller sampling instants in digital implementations. For safety constraints with relative degree higher than one, existing methods either chain multiple class~$\mathcal{K}$ functions whose number grows with the relative degree, or use Taylor expansions without class~$\mathcal{K}$ functions that regulate the barrier decay rate. We introduce a sampled-time Truncated Taylor Control Barrier Function (TTCBF), which combines a Taylor expansion with a single class~$\mathcal{K}$ function, thereby decoupling the number of tuning parameters from the relative degree while retaining barrier-decay regulation.
-We also propose an adaptive variant (aTTCBF) that optimizes a barrier-decay gain online without increasing the number of tuning parameters. We compare TTCBF and aTTCBF against ten baseline methods in a nonlinear obstacle-avoidance scenario, and stress-test all adaptive methods under different tightened control bounds, where our aTTCBF is the only compared method that remains feasible throughout.
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![arXiv: 2601.15196](https://img.shields.io/badge/arXiv-2601.15196-b31b1b.svg)](https://arxiv.org/abs/2601.15196)
 
+This repository contains the reproducible simulation code for the manuscript
+**“TTCBF: A Sampled-Time Truncated Taylor Control Barrier Function for High-Order Safety Constraints.”**
+It compares the proposed truncated Taylor control barrier function (TTCBF) and
+adaptive TTCBF (aTTCBF) with ten baseline methods in a nonlinear static-obstacle
+avoidance scenario.
 
-## Install
-- Requirements
-  - Python 3.11 (other versions may also work)
-  - All required Python packages are listed in `requirements.txt`
+## Experiment overview
 
-- Create a Virtual Environment (Recommended)
-  ```bash
-  # Create environment
-  conda create -n ttcbf python=3.11 -y
+The simulated vehicle has state
+`[p_x, p_y, theta, v]` and control `[u_1, u_2]`, where `u_1` is yaw rate and
+`u_2` is acceleration. The default experiment uses:
 
-  # Activate environment
-  conda activate ttcbf
+- sampling period: `0.05 s`;
+- simulation horizon: `14 s`;
+- initial state: `(0, -1.5, 0, 1)`;
+- goal position: `(10, 0)`;
+- obstacle center and radius: `(5, 0)` and `1.0 m`;
+- vehicle radius: `0.2 m`;
+- yaw-rate bounds: `[-2, 2] rad/s`;
+- acceleration bounds: `[-1, 1] m/s^2`.
 
-  # Install dependencies
-  pip install -r requirements.txt
-  ```
+The script implements these method identifiers:
 
-## How to Use
-- run `main.py`
+| Identifier | Display name |
+| --- | --- |
+| `ttcbf` | TTCBF (ours) |
+| `attcbf` | aTTCBF (ours) |
+| `dt_hocbf` | DT-HOCBF |
+| `adt_hocbf` | aDT-HOCBF |
+| `ct_hocbf` | CT-HOCBF |
+| `pacbf` | PACBF |
+| `racbf` | RACBF |
+| `avcbf` | AVCBF |
+| `tlc` | ZOH-TLC |
+| `rtlc` | rTLC |
+| `event_triggered_tlc` | ET-TLC |
+| `event_triggered_atlc` | ET-aTLC |
 
-## Simulation Videos (Coming Soon!)
+All method implementations and parameter values used for the manuscript are
+self-contained in [`main.py`](main.py); no files from another repository are
+required.
 
-## Number of Tuning Parameters
-The counts reported in the manuscript follow a consistent methodology across all methods for the obstacle-avoidance scenario (relative degree $r=2$). ``Tuning parameters'' are defined as parameters of the safety constraint and its auxiliary mechanisms, including class $\mathcal{K}$ coefficients, adaptation-related auxiliary-dynamics parameters, and associated QP cost weights. Parameters of the goal-oriented CLF (those in~\eqref{eq:qp-stability}) are excluded. Below, each method's count is itemized.
+## Installation
 
-**Recursive-chain methods (counts scale with $r$)**
+The reference environment uses Python 3.11. Create an isolated Conda
+environment and install the pinned dependencies:
 
-| Method    | Count | Breakdown                                                                                                                                                                                                                                                                                                                                                                               |
-| --------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CT-HOCBF  | 2     | Two class $\mathcal{K}$ coefficients ($k_1,k_2$), one per HOCBF chain level                                                                                                                                                                                                                                                                                                         |
-| DT-HOCBF  | 2     | Two class $\mathcal{K}$ coefficients ($\gamma_1,\gamma_2\in(0,1)$), discrete-time analog of CT-HOCBF                                                                                                                                                                                                                                                                                |
-| PACBF     | 9     | 2 base class $\mathcal{K}$ coefficients $+$ penalty-function HOCBF/CLF parameters (class $\mathcal{K}$ coefficient and CLF convergence rate for $p_1(t)$) $+$ penalty bounds and target values ($p_1^*$, $p_{1,\max}$, $p_1(0)$) $+$ QP cost weights ($W_1$ on auxiliary input, $P_1$ on auxiliary slack, $Q$ on $p_2$ deviation)                             |
-| RACBF     | 11    | 2 base class $\mathcal{K}$ coefficients $+$ relaxation-variable HOCBF (relative degree 2: 2 class $\mathcal{K}$ coefficients) $+$ CLF parameters for relaxation stabilization (convergence rate $\epsilon$, target $r^*$) $+$ robustness margin $r^a>0$ $+$ initial value $r(0)$ $+$ QP cost weights ($P_r$ on auxiliary input/slack, $p_{acc}$ on CLF slack) |
-| AVCBF     | 9     | 2 base class $\mathcal{K}$ coefficients for main chain $+$ auxiliary-variable HOCBF chain (2 class $\mathcal{K}$ coefficients for $a_1(t)$) $+$ QP cost weight $W_1$ on auxiliary input $\nu_1$ $+$ convergence target $a_{1,w}$ $+$ strict positivity constant $\epsilon$ $+$ initial auxiliary states                                                         |
-| aDT-HOCBF | 11    | 2 base class $\mathcal{K}$ coefficients (now time-varying) $+$ penalty-function HOCBF/CLF parameters for each penalty $\gamma_i$ (relative degree $m-i$) $+$ penalty bounds (in $(0,1)$) $+$ CLF target values $+$ QP cost weights on auxiliary inputs and slacks                                                                                                       |
+```bash
+git clone https://github.com/bassamlab/ttcbf.git
+cd ttcbf
+conda create -n ttcbf python=3.11 -y
+conda activate ttcbf
+python -m pip install -r requirements.txt
+```
 
-**Taylor-expansion methods (counts independent of $r$)**
+MP4 export is optional and requires
+[FFmpeg](https://ffmpeg.org/) on the system path:
 
-| Method           | Count       | Breakdown                                                                                                                                |
-| ---------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| ZOH-TLC          | 1           | Discretization time step$\Delta t$ (no class $\mathcal{K}$ functions)                                                                |
-| rTLC             | 1           | Discretization time step$\Delta t$ (no class $\mathcal{K}$ functions; robust residual bound depends only on $\Delta t$)            |
-| ET-TLC           | 3           | $\Delta t$ $+$ event-triggering state bounds ($\mathbf{x}_{\text{lower}}$, $\mathbf{x}_{\text{up}}$)                             |
-| ET-aTLC          | 4           | Time-scale bounds ($\tau_{\min},\tau_{\max}$) $+$ rollout look-ahead horizon $T_{\text{look}}$ $+$ event-triggering state bounds |
-| **TTCBF** (our)  | **1** | One class $\mathcal{K}$ coefficient                                                                                                    |
-| **aTTCBF** (our) | **1** | One adaptive-gain penalty weight $w_\eta$                                                                                               |
+```bash
+# macOS with Homebrew
+brew install ffmpeg
 
-The key structural difference is that recursive-chain methods require $r$ class $\mathcal{K}$ functions in their base form, and each adaptive mechanism (penalty functions, relaxation variables, auxiliary variables) introduces its own HOCBF chain—complete with class $\mathcal{K}$ coefficients, CLF-like stabilization, target values, and QP weights—adding 7--9 parameters per mechanism. In contrast, Taylor-expansion methods avoid the recursive chain entirely; TTCBF uses exactly one class $\mathcal{K}$ function regardless of $r$, and aTTCBF replaces manual tuning of that single function with one QP penalty weight.
+# Ubuntu or Debian
+sudo apt-get install ffmpeg
+```
 
+The manuscript results were generated on an Apple M2 Pro with 16 GB of RAM.
+The simulation outputs are deterministic within normal solver tolerances, but
+reported wall-clock runtimes depend on the machine and current system load.
+
+## Reproducing the results
+
+### Default comparison
+
+Run all 12 methods with the manuscript's default control bounds:
+
+```bash
+python main.py
+```
+
+Results are written to `eval_results_accel_min-1/`. Under these bounds, TTCBF,
+aTTCBF, all recursive-chain baselines, and ET-aTLC reach the goal. ZOH-TLC,
+rTLC, and ET-TLC terminate because their QPs become infeasible.
+
+### Enlarged braking bound
+
+Reproduce the comparison with the lower acceleration bound set to `-1.5 m/s^2`:
+
+```bash
+python main.py --accel-min -1.5
+```
+
+The default output directory is `eval_results_accel_min-1.5/`.
+
+### Run selected methods without cached baselines
+
+Use `--methods` with `--no-reuse-cache` to simulate only selected methods:
+
+```bash
+python main.py \
+  --methods ttcbf,attcbf \
+  --no-reuse-cache \
+  --out-dir eval_results_ttcbf_only
+```
+
+Without `--no-reuse-cache`, compatible cached baselines in the output directory
+are included in the comparison. Requested methods are always recomputed;
+missing or stale baseline caches are simulated automatically.
+
+### Export a trajectory video
+
+Add `--save-video` to a single-scenario run:
+
+```bash
+python main.py --save-video
+```
+
+After simulation and cache loading are complete, the script exports
+`video_xy_trajectories.mp4`. The video supports fully cached, fully fresh, and
+mixed result sets, and uses the same trajectory styles and inset view as
+`fig_xy_trajectories.pdf`. Video export is intentionally unavailable for grid
+sweeps.
+
+### Override scenario or method parameters
+
+Use repeatable `--set NAME=VALUE` arguments for fields defined by `Scenario`:
+
+```bash
+python main.py \
+  --methods avcbf \
+  --set avcbf_k1=0.5 \
+  --set avcbf_k2=0.5
+```
+
+The dedicated `--accel-min` option is equivalent to setting `accel_min` and
+takes precedence when both forms are supplied. Run `python main.py --help` for
+the complete command-line interface.
+
+### Tight-control adaptive sweep
+
+Reproduce the manuscript's 400 control-bound combinations for the six adaptive
+methods:
+
+```bash
+python main.py --grid-sweep --no-plot-figure
+```
+
+This evaluates 20 braking bounds and 20 negative yaw-rate bounds, for 2,400
+rollouts in total. Omit `--no-plot-figure` to additionally save a trajectory
+figure for every control-bound combination. The sweep can take substantially
+longer than the default comparison.
+
+## Outputs and caching
+
+A standard run produces:
+
+- `summary.csv`: rollout outcomes, safety, control, and timing metrics;
+- `simulation_logs.npz`: state and control trajectories;
+- `method_cache/*.npz`: reusable per-method simulation results;
+- `fig_all_methods_legend.pdf`, `fig_composite_results.pdf`, `fig_cbf_h.pdf`,
+  `fig_speed.pdf`, `fig_acceleration_steering_rate.pdf`,
+  `fig_taylor_residuals.pdf`, and `fig_xy_trajectories.pdf`: manuscript-ready
+  figures.
+
+When `--save-video` is supplied, the run also produces
+`video_xy_trajectories.mp4`. The video is regenerated from the collected
+trajectories and is not part of the method cache.
+
+Grid sweeps produce `grid_sweep_rollouts.csv` and
+`grid_sweep_method_summary.csv`. Generated result directories are intentionally
+ignored by Git. Delete an output directory or pass `--no-reuse-cache` when a
+completely fresh run is required. Cache compatibility accounts for shared
+scenario settings and method-specific parameters.
+
+## Number of tuning parameters
+
+The manuscript counts user-chosen safety-constraint parameters, auxiliary
+dynamics parameters, and associated QP weights; goal-oriented CLF parameters
+are excluded.
+
+| Method | Count | Main source of tuning parameters |
+| --- | ---: | --- |
+| TTCBF (our) | **1** | One class-K coefficient |
+| aTTCBF (our) | **1** | One adaptive-gain penalty weight |
+| DT-HOCBF | 2 | Two discrete-time class-K coefficients |
+| aDT-HOCBF | 11 | Adaptive discrete-time gains and auxiliary dynamics |
+| CT-HOCBF | 2 | Two class-K coefficients |
+| PACBF | 9 | Base gains, penalty dynamics, targets, and QP weights |
+| RACBF | 11 | Base gains, relaxation dynamics, targets, and QP weights |
+| AVCBF | 9 | Base gains, auxiliary-variable dynamics, and QP weights |
+| ZOH-TLC | 1 | Taylor time step |
+| rTLC | 1 | Taylor time step |
+| ET-TLC | 3 | Time step and event-triggering state bounds |
+| ET-aTLC | 4 | Time-scale bounds, look-ahead horizon, and state bounds |
+
+TTCBF and aTTCBF retain one tuning parameter independently of the safety
+constraint's relative degree; recursive-chain constructions require additional
+class-K functions as the relative degree increases.
+
+## Reproducibility note
+
+The experiments use a rate-bounded estimate of the Taylor residual. As stated
+in the manuscript, this estimate is rigorous for smooth inputs but is a
+practical approximation under zero-order hold. The script therefore also
+exports an a posteriori comparison between the estimated lower bound and the
+realized closed-loop residual along the simulated TTCBF trajectories.
+
+## Citation
+
+If this repository supports your work, please cite:
+
+```bibtex
+@article{xu2026ttcbf,
+  title   = {{TTCBF}: A Sampled-Time Truncated Taylor Control Barrier Function for High-Order Safety Constraints},
+  author  = {Xu, Jianye and Alrifaee, Bassam},
+  journal = {arXiv preprint arXiv:2601.15196},
+  year    = {2026}
+}
+```
+
+## License
+
+This project is released under the [MIT License](LICENSE).

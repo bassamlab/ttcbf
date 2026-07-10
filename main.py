@@ -1,55 +1,16 @@
 #!/usr/bin/env python3
-"""Compare Taylor/CBF methods on one static disk-obstacle scenario.
+"""Reproduce the nonlinear obstacle-avoidance experiments for TTCBF.
 
-The script implements the method-specific safety constraints described in:
+The script compares TTCBF and adaptive TTCBF (aTTCBF) with ten baseline
+controllers on the static disk-obstacle scenario from the accompanying
+manuscript. It simulates the unicycle model, writes numerical logs as CSV/NPZ
+files, and produces the manuscript-ready PDF figures.
 
-- xiao2025taylorlagrange/tlc_implementation.md
-- xiao2025taylorlagrange/event_triggered_tlc_implementation.md
-- xiao2026robust/rtlc_implementation.md
-- liu2026eventtriggered/atlc_implementation.md
-- xu2026ttcbf/ttcbf_implementation.md
-- xu2026ttcbf/attcbf_implementation.md
-- xiao2022adaptive/xiao2022adaptive_implementation.md
-- liu2023auxiliaryvariable/avcbf_implementation.md
-- xiao2022highorder/ct_hocbf.py
-- xiong2023discretetime/discrete_time_cbf_implementation.md
-
-The vehicle model is the unicycle/yaw-rate model used in the robot examples of
-the Taylor-Lagrange Control and TTCBF papers:
-
-    x_dot = v cos(theta), y_dot = v sin(theta),
-    theta_dot = omega,    v_dot = a.
-
-The requested "steering rate" control is therefore the yaw/turning rate u_1 in
-those papers, not the steering-angle-rate of a kinematic bicycle model.
-
-CLI usage:
-
-    # Default cached comparison run. This reuses compatible per-method caches
-    # under eval_results_accel_min-0.4/method_cache/ and simulates missing or
-    # stale methods.
-    python eval_static_obstacle.py
-
-    # Tune one method while comparing against compatible cached baselines.
-    python eval_static_obstacle.py \\
-        --accel-min -0.2 \\
-        --methods avcbf \\
-        --set avcbf_k1=0.5 \\
-        --set avcbf_k2=0.5
-
-    # Tune another method. Method-specific parameter changes invalidate only
-    # that method's cache; shared scenario changes invalidate all caches.
-    python eval_static_obstacle.py \\
-        --accel-min -0.6 \\
-        --methods racbf \\
-        --set racbf_k1=1.0 \\
-        --set racbf_k2=2.0
-
-Use --methods with comma-separated method names to simulate selected methods
-fresh while still plotting compatible cached baselines. Pass --no-reuse-cache
-to simulate without loading cached baselines. Use repeated --set name=value
-arguments to override Scenario fields.
-Progress bars are always enabled for freshly simulated methods.
+Running ``python main.py`` evaluates the default scenario. Compatible
+per-method results are reused from the output directory when available; stale
+or missing results are simulated automatically. Run ``python main.py --help``
+for method selection, scenario overrides, cache controls, and grid-sweep
+options.
 """
 
 from __future__ import annotations
@@ -61,18 +22,19 @@ import hashlib
 import itertools
 import json
 import math
-import os
 import time
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-codex")
-
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import animation
 from matplotlib.colors import to_rgba
 from matplotlib.lines import Line2D
+from matplotlib.path import Path as MatplotlibPath
+from matplotlib.transforms import Affine2D
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 import numpy as np
 import osqp
@@ -84,15 +46,16 @@ SINGLE_COLUMN_WIDTH = 3.4
 PLOT_SIZE = (SINGLE_COLUMN_WIDTH, 2.4)
 PLOT_TWO_PANEL_SIZE = (SINGLE_COLUMN_WIDTH, 1.6)
 PLOT_TRAJECTORY_SIZE = (SINGLE_COLUMN_WIDTH, 3.0)
-PLOT_EVENT_SIZE = (SINGLE_COLUMN_WIDTH, 2.2)
+PLOT_TRAJECTORY_VIDEO_SIZE = (SINGLE_COLUMN_WIDTH, 2.1)
 SAVEFIG_PAD_INCHES = 0.02
 IS_ADD_ALL_METHOD_LEGEND = False
 REFERENCE_LINEWIDTH = 1.0
 SOLVER_FALLBACK_MARKER_SIZE = 20.0
 COLLISION_OR_FINAL_MARKER_SIZE = 20.0
-MISC_MARKER_SIZE = 20.0
 START_GOAL_MARKER_SIZE = 40.0
-SMOOTHING_WINDOW = 11
+VIDEO_DPI = 180
+VIDEO_FINAL_HOLD_SECONDS = 1.0
+VIDEO_VEHICLE_MARKER_SIZE = 5.0
 GOAL_REACHED_TOLERANCE = 0.1
 COLLISION_H_TOLERANCE = 1.0e-6
 DIRECT_QP_EPS_ABS = 1.0e-5
@@ -625,33 +588,7 @@ METHOD_ZORDERS = {
     "ttcbf": 21,
 }
 
-PLOT_GROUPS = (
-    (None, METHODS),
-    (
-        "taylor_based_methods",
-        (
-            "ttcbf",
-            "attcbf",
-            "tlc",
-            "rtlc",
-            "event_triggered_tlc",
-            "event_triggered_atlc",
-        ),
-    ),
-    (
-        "auxiliary_enabled_methods",
-        (
-            "ttcbf",
-            "attcbf",
-            "ct_hocbf",
-            "dt_hocbf",
-            "adt_hocbf",
-            "pacbf",
-            "racbf",
-            "avcbf",
-        ),
-    ),
-)
+PLOT_GROUPS = ((None, METHODS),)
 
 CACHE_VERSION = 10
 METHOD_CACHE_DIRNAME = "method_cache"
@@ -1402,29 +1339,48 @@ def draw_trajectory_status_markers(
         )
 
 
-def representative_trajectory_event_points(
+def trajectory_event_time(
+    result: dict[str, np.ndarray | str | int | float],
+    point: np.ndarray,
+) -> float:
+    states = np.asarray(result["states"], dtype=float)
+    times = np.asarray(result["times"], dtype=float)
+    n_values = min(states.shape[0], times.size)
+    if n_values == 0:
+        return result_stop_time(result)
+    distances = np.linalg.norm(states[:n_values, :2] - point, axis=1)
+    return float(times[int(np.argmin(distances))])
+
+
+def representative_trajectory_events(
     results: list[dict[str, np.ndarray | str | int | float]],
     scenario: Scenario,
-) -> dict[str, np.ndarray]:
-    event_points: dict[str, np.ndarray] = {}
+) -> dict[str, tuple[np.ndarray, float]]:
+    events: dict[str, tuple[np.ndarray, float]] = {}
 
     for result in results:
         states = np.asarray(result["states"], dtype=float)
         crossing = first_collision_point(result, scenario)
 
-        if "Collision" not in event_points:
+        if "Collision" not in events:
             if crossing is not None:
-                event_points["Collision"] = np.asarray(crossing, dtype=float)
+                point = np.asarray(crossing, dtype=float)
+                events["Collision"] = (point, trajectory_event_time(result, point))
 
-        if "QP infeasible" not in event_points:
+        if "QP infeasible" not in events:
             if result_stop_reason(result) == "solver_infeasible" and states.size:
-                event_points["QP infeasible"] = states[-1, :2].copy()
+                point = states[-1, :2].copy()
+                events["QP infeasible"] = (point, result_stop_time(result))
             else:
                 fallback_positions = fallback_marker_positions(result, scenario)
                 if fallback_positions.size:
-                    event_points["QP infeasible"] = fallback_positions[0].copy()
+                    point = fallback_positions[0].copy()
+                    events["QP infeasible"] = (
+                        point,
+                        trajectory_event_time(result, point),
+                    )
 
-        if "Stopped" not in event_points:
+        if "Stopped" not in events:
             stop_reason = result_stop_reason(result)
             if (
                 states.size
@@ -1432,22 +1388,34 @@ def representative_trajectory_event_points(
                 and crossing is None
                 and stop_reason != "solver_infeasible"
             ):
-                event_points["Stopped"] = states[-1, :2].copy()
+                point = states[-1, :2].copy()
+                events["Stopped"] = (point, result_stop_time(result))
 
         if (
-            "Collision" in event_points
-            and "QP infeasible" in event_points
-            and "Stopped" in event_points
+            "Collision" in events
+            and "QP infeasible" in events
+            and "Stopped" in events
         ):
             break
 
-    return event_points
+    return events
+
+
+def representative_trajectory_event_points(
+    results: list[dict[str, np.ndarray | str | int | float]],
+    scenario: Scenario,
+) -> dict[str, np.ndarray]:
+    return {
+        label: point
+        for label, (point, _) in representative_trajectory_events(results, scenario).items()
+    }
 
 
 def annotate_trajectory_event_points(
     ax: plt.Axes,
     event_points: dict[str, np.ndarray],
-) -> None:
+) -> dict[str, plt.Annotation]:
+    annotations: dict[str, plt.Annotation] = {}
     x_min, x_max = ax.get_xlim()
     y_min, y_max = ax.get_ylim()
     x_span = max(abs(x_max - x_min), 1.0e-12)
@@ -1458,7 +1426,7 @@ def annotate_trajectory_event_points(
             continue
         text_x = float(np.clip(point[0] + 0.13 * x_span, x_min + 0.08 * x_span, x_max - 0.24 * x_span))
         text_y = float(np.clip(point[1] + 0.22 * y_span, y_min + 0.12 * y_span, y_max - 0.18 * y_span))
-        ax.annotate(
+        annotations[label] = ax.annotate(
             label,
             xy=(float(point[0]), float(point[1])),
             xycoords="data",
@@ -1475,6 +1443,7 @@ def annotate_trajectory_event_points(
                 "shrinkB": 3.0,
             },
         )
+    return annotations
 
 
 def print_progress(
@@ -3149,37 +3118,6 @@ def simulate_method(
     )
 
 
-def plot_series(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    key: str,
-    ylabel: str,
-    output: Path,
-    scenario: Scenario,
-    control_time: bool = False,
-    zero_line: bool = False,
-) -> None:
-    fig, ax = new_paper_figure()
-    if ylabel:
-        ylabel = ylabel[:1].upper() + ylabel[1:]
-    for result in results:
-        t_key = "control_times" if control_time else "times"
-        ax.plot(
-            result[t_key],
-            result[key],
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-    if zero_line:
-        add_horizontal_reference(ax, 0.0, "Zero")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel(ylabel)
-    ax.set_xlim(0.0, scenario.horizon)
-    ax.grid(True, alpha=0.20)
-    if should_add_method_legend(results):
-        add_series_legend(ax)
-    save_paper_figure(fig, output)
-
-
 def plot_taylor_residuals(
     results: list[dict[str, np.ndarray | str | int | float]],
     scenario: Scenario,
@@ -3283,25 +3221,6 @@ def plot_taylor_residuals(
             )
         add_series_legend(ax, loc="upper right")
         save_paper_figure(fig, output)
-
-
-def smooth_curve(values: np.ndarray, window: int = SMOOTHING_WINDOW) -> np.ndarray:
-    arr = np.asarray(values, dtype=float)
-    if arr.size <= 1:
-        return arr
-    window = max(1, min(int(window), arr.size))
-    if window <= 1:
-        return arr
-    if window % 2 == 0:
-        window += 1
-        if window > arr.size:
-            window = arr.size if arr.size % 2 == 1 else arr.size - 1
-            if window <= 1:
-                return arr
-    pad = window // 2
-    padded = np.pad(arr, (pad, pad), mode="edge")
-    kernel = np.full(window, 1.0 / window, dtype=float)
-    return np.convolve(padded, kernel, mode="valid")
 
 
 def timing_metrics(
@@ -3602,368 +3521,6 @@ def save_composite_results_plot(
     save_paper_figure(fig, out_dir / "fig_composite_results.pdf")
 
 
-def lower_is_better_ratio_score(value: float, values: list[float]) -> float:
-    finite_nonnegative_values = [
-        float(item)
-        for item in values
-        if math.isfinite(float(item)) and float(item) >= 0.0
-    ]
-    if not math.isfinite(float(value)) or float(value) < 0.0 or not finite_nonnegative_values:
-        return 0.0
-    best_value = min(finite_nonnegative_values)
-    if best_value == 0.0:
-        return 100.0 if float(value) == 0.0 else 0.0
-    return float(np.clip(100.0 * best_value / float(value), 0.0, 100.0))
-
-
-def radar_polygon_area(scores: list[float]) -> float:
-    values = np.asarray(scores, dtype=float)
-    if values.size < 3 or not np.all(np.isfinite(values)):
-        return math.nan
-    angle_step = 2.0 * math.pi / values.size
-    shifted = np.roll(values, -1)
-    return float(0.5 * math.sin(angle_step) * np.sum(values * shifted))
-
-
-def radar_scale_value_label(value: float, metric: str) -> str:
-    if not math.isfinite(value):
-        return ""
-    if metric == "rtf":
-        return f"{value:.0f}"
-    if metric == "time":
-        return f"{value:.0f}"
-    if metric == "effort":
-        return f"{value:.1f}"
-    if metric == "count":
-        return f"{value:.0f}" if abs(value - round(value)) < 1.0e-9 else f"{value:.1f}"
-    return f"{value:.2g}"
-
-
-RADAR_TICK_RADII = (20.0, 40.0, 60.0, 80.0, 100.0)
-RADAR_AXIS_SCALES = (
-    (0.0, 120.0, "rtf"),
-    (30.0, 10.0, "time"),
-    (0.5, 0.1, "effort"),
-    (20.0, 0.0, "count"),
-)
-
-
-def radar_linear_score(value: float, worst: float, best: float) -> float:
-    if not all(math.isfinite(item) for item in (value, worst, best)):
-        return 0.0
-    if best == worst:
-        return RADAR_TICK_RADII[-1] if value == best else 0.0
-    fraction = float(np.clip((float(value) - worst) / (best - worst), 0.0, 1.0))
-    return float(
-        RADAR_TICK_RADII[0]
-        + fraction * (RADAR_TICK_RADII[-1] - RADAR_TICK_RADII[0])
-    )
-
-
-def radar_tick_values(worst: float, best: float) -> np.ndarray:
-    if not math.isfinite(worst) or not math.isfinite(best):
-        return np.full(len(RADAR_TICK_RADII), np.nan, dtype=float)
-    return np.linspace(worst, best, len(RADAR_TICK_RADII), dtype=float)
-
-
-def add_physical_radar_tick_labels(
-    ax: plt.Axes,
-    angles: np.ndarray,
-    scales: tuple[tuple[float, float, str], ...],
-) -> None:
-    label_box = {
-        "boxstyle": "round,pad=0.30",
-        "facecolor": "white",
-        "alpha": 0.6,
-        "edgecolor": "0.78",
-        "linewidth": 0.25,
-    }
-    axis_specs = (
-        ((0.0, 0.0, "center", "center"),) * len(RADAR_TICK_RADII),
-        ((0.0, 0.0, "center", "center"),) * len(RADAR_TICK_RADII),
-        (
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-        ),
-        (
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-            (0.0, 0.0, "center", "center"),
-        ),
-    )
-    for axis_index, (theta, scale, axis_tick_specs) in enumerate(
-        zip(angles, scales, axis_specs, strict=True)
-    ):
-        worst, best, metric = scale
-        for radius, value, axis_spec in zip(
-            RADAR_TICK_RADII,
-            radar_tick_values(worst, best),
-            axis_tick_specs,
-            strict=True,
-        ):
-            if not math.isfinite(float(value)):
-                continue
-            dx, dy, ha, va = axis_spec
-            ax.annotate(
-                radar_scale_value_label(float(value), metric),
-                xy=(float(theta), radius),
-                xycoords="data",
-                xytext=(dx, dy),
-                textcoords="offset points",
-                ha=ha,
-                va=va,
-                color="0.12",
-                bbox=label_box,
-                clip_on=False,
-                zorder=8 + axis_index,
-            )
-
-
-def add_radar_axis_labels(
-    ax: plt.Axes,
-    angles: np.ndarray,
-    labels: tuple[str, ...],
-) -> None:
-    label_specs = (
-        (0.0, 6.0, "center", "bottom"),
-        (7.0, 0.0, "left", "center"),
-        (0.0, -7.0, "center", "top"),
-        (-6.0, 0.0, "right", "center"),
-    )
-    for theta, label, label_spec in zip(angles, labels, label_specs, strict=True):
-        dx, dy, ha, va = label_spec
-        ax.annotate(
-            label,
-            xy=(float(theta), 100.0),
-            xycoords="data",
-            xytext=(dx, dy),
-            textcoords="offset points",
-            ha=ha,
-            va=va,
-            clip_on=False,
-            linespacing=0.9,
-            fontsize=6.0,
-            zorder=10,
-        )
-
-
-def radar_axis_scales_from_rows(
-    rows: list[dict[str, object]],
-) -> tuple[tuple[float, float, str], ...]:
-    return RADAR_AXIS_SCALES
-
-
-def performance_radar_rows(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    scenario: Scenario,
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    computation_runtimes: list[float] = []
-
-    for result in results:
-        method = str(result["method"])
-        metrics = timing_metrics(result, scenario)
-        real_time_factor = float(metrics["controller_real_time_factor"])
-        computation_runtime = controller_runtime_full_horizon(result)
-        effort_components = control_effort_components(result, scenario)
-        effort_value = float(effort_components["control_effort_raw"])
-        tuning_count = tuning_parameter_count(method)
-        completion_time = task_completion_time(result)
-        reached = reached_goal(result)
-        collided = first_collision_point(result, scenario) is not None
-        computation_runtimes.append(computation_runtime)
-        rows.append(
-            {
-                "method": method,
-                "label": result["label"],
-                "real_time_factor": real_time_factor,
-                "computation_runtime_s": computation_runtime,
-                "task_completion_time_s": completion_time,
-                "reached_goal": reached,
-                "has_collision": collided,
-                "control_magnitude_raw": effort_components["control_magnitude_raw"],
-                "control_rate_raw": effort_components["control_rate_raw"],
-                "control_effort_raw": effort_value,
-                "tuning_parameter_count": tuning_count,
-                "tuning_parameter_fields": ";".join(TUNING_PARAMETER_FIELDS.get(method, ())),
-            }
-        )
-
-    (
-        real_time_scale,
-        completion_scale,
-        effort_scale,
-        tuning_scale,
-    ) = radar_axis_scales_from_rows(rows)
-    failed_control_plot_offset = 1.0
-    for row in rows:
-        completion_time = float(row["task_completion_time_s"])
-        reached = bool(row["reached_goal"])
-        collided = bool(row["has_collision"])
-        real_time_factor = float(row["real_time_factor"])
-        if (
-            reached
-            and not collided
-            and math.isfinite(completion_time)
-            and completion_time >= 0.0
-        ):
-            control_score = radar_linear_score(
-                completion_time,
-                completion_scale[0],
-                completion_scale[1],
-            )
-        else:
-            control_score = 0.0
-        control_plot_score = control_score
-        if control_score == 0.0 and (not reached or collided):
-            control_plot_score = failed_control_plot_offset
-            failed_control_plot_offset += 1.0
-        row["computation_score"] = lower_is_better_ratio_score(
-            float(row["computation_runtime_s"]),
-            computation_runtimes,
-        )
-        row["real_time_factor_score"] = float(
-            radar_linear_score(
-                real_time_factor,
-                real_time_scale[0],
-                real_time_scale[1],
-            )
-        )
-        row["control_performance_score"] = float(np.clip(control_score, 0.0, 100.0))
-        row["control_performance_plot_score"] = float(
-            np.clip(control_plot_score, 0.0, 100.0)
-        )
-        row["control_effort_score"] = radar_linear_score(
-            float(row["control_effort_raw"]),
-            effort_scale[0],
-            effort_scale[1],
-        )
-        row["tuning_parameter_score"] = radar_linear_score(
-            float(row["tuning_parameter_count"]),
-            tuning_scale[0],
-            tuning_scale[1],
-        )
-        row["radar_polygon_area"] = radar_polygon_area(
-            [
-                float(row["real_time_factor_score"]),
-                float(row["control_performance_plot_score"]),
-                float(row["control_effort_score"]),
-                float(row["tuning_parameter_score"]),
-            ]
-        )
-
-    return rows
-
-
-def save_performance_radar_chart(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    scenario: Scenario,
-    out_dir: Path,
-) -> None:
-    if not results:
-        return
-
-    rows = performance_radar_rows(results, scenario)
-    fieldnames = [
-        "method",
-        "label",
-        "radar_polygon_area",
-        "computation_score",
-        "real_time_factor_score",
-        "control_performance_score",
-        "control_performance_plot_score",
-        "control_effort_score",
-        "tuning_parameter_score",
-        "real_time_factor",
-        "computation_runtime_s",
-        "task_completion_time_s",
-        "reached_goal",
-        "has_collision",
-        "control_magnitude_raw",
-        "control_rate_raw",
-        "control_effort_raw",
-        "tuning_parameter_count",
-        "tuning_parameter_fields",
-    ]
-    with (out_dir / "performance_radar_metrics.csv").open("w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    axis_labels = (
-        "Real-time factor [-]",
-        "Task\ncompletion\ntime [s]",
-        "Control effort and smoothness [-]",
-        "#Tuning\nparameters",
-    )
-    angles = np.linspace(0.0, 2.0 * math.pi, len(axis_labels), endpoint=False)
-    closed_angles = np.concatenate((angles, angles[:1]))
-
-    fig, ax = new_paper_figure(
-        (3.4, 3.4),
-        subplot_kw={"projection": "polar"},
-        constrained_layout=False,
-    )
-    # fig.subplots_adjust(top=0.76, bottom=0.09, left=0.18, right=0.82)
-    for result, row in zip(results, rows):
-        scores = np.array(
-            [
-                float(row["real_time_factor_score"]),
-                float(row["control_performance_plot_score"]),
-                float(row["control_effort_score"]),
-                float(row["tuning_parameter_score"]),
-            ],
-            dtype=float,
-        )
-        closed_scores = np.concatenate((scores, scores[:1]))
-        ax.plot(
-            closed_angles,
-            closed_scores,
-            label=(
-                result_legend_label(result, scenario)
-            ),
-            **method_plot_kwargs(result),
-        )
-
-    ax.set_theta_offset(math.pi / 2.0)
-    ax.set_theta_direction(-1)
-    ax.set_xticks(angles)
-    ax.set_xticklabels([])
-    ax.set_ylim(0.0, 100.0)
-    ax.set_yticks(RADAR_TICK_RADII)
-    ax.set_yticklabels([])
-    ax.tick_params(axis="x", pad=5, labelsize=6.9)
-    add_radar_axis_labels(ax, angles, axis_labels)
-    ax.grid(True, alpha=0.3)
-    ax.spines["polar"].set_visible(False)
-    ygridlines = ax.yaxis.get_gridlines()
-    if ygridlines:
-        ygridlines[0].set_color("black")
-        ygridlines[0].set_alpha(0.6)
-        ygridlines[0].set_linewidth(0.6)
-        ygridlines[-1].set_color("black")
-        ygridlines[-1].set_alpha(0.6)
-        ygridlines[-1].set_linewidth(1.0)
-    add_physical_radar_tick_labels(ax, angles, radar_axis_scales_from_rows(rows))
-    if should_add_method_legend(results):
-        add_series_legend(
-            ax,
-            loc="lower center",
-            outside_threshold=len(rows) + 1,
-            bbox_to_anchor=(0.5, 1.1),
-            ncol=3,
-            borderaxespad=0.0,
-            columnspacing=0.8,
-            handlelength=1.8,
-        )
-    save_paper_figure(fig, out_dir / "fig_performance_radar.pdf")
-
-
 def save_plots(results: list[dict[str, np.ndarray | str | int | float]], scenario: Scenario, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4017,15 +3574,6 @@ def save_plots(results: list[dict[str, np.ndarray | str | int | float]], scenari
         axins.grid(True, alpha=0.20)
         mark_inset(ax, axins, loc1=3, loc2=4, fc="none", ec="0.5")
     save_paper_figure(fig, out_dir / "fig_cbf_h.pdf")
-
-    plot_series(
-        results,
-        "clearance_values",
-        "signed clearance [m]",
-        out_dir / "fig_signed_clearance.pdf",
-        scenario=scenario,
-        zero_line=True,
-    )
 
     fig, ax = new_paper_figure(figsize=(SINGLE_COLUMN_WIDTH, 1.6))
     for result in results:
@@ -4099,325 +3647,9 @@ def save_plots(results: list[dict[str, np.ndarray | str | int | float]], scenari
     ax_steer.set_xlabel("Time [s]")
     save_paper_figure(fig, out_dir / "fig_acceleration_steering_rate.pdf")
 
-    fig, (ax_step, ax_update) = new_paper_figure(
-        PLOT_TWO_PANEL_SIZE,
-        2,
-        1,
-        sharex=True,
-    )
-    for result in results:
-        step_ms = 1000.0 * np.asarray(result["step_compute_times"], dtype=float)
-        update_mask = np.asarray(result["event_flags"], dtype=bool)
-        step_clock = np.asarray(result.get("step_times", result["control_times"]), dtype=float)
-        if step_ms.size == 0 or step_clock.size == 0:
-            continue
-        ax_step.plot(
-            step_clock,
-            step_ms,
-            color=method_color(result),
-            linestyle=method_linestyle(result),
-            alpha=0.2,
-            linewidth=method_linewidth(result),
-            zorder=method_zorder(result),
-            label=None,
-        )
-        smoothed = smooth_curve(step_ms, window=SMOOTHING_WINDOW)
-        ax_step.plot(
-            step_clock,
-            smoothed,
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-
-        update_ms = np.full_like(step_ms, np.nan)
-        update_ms[update_mask] = step_ms[update_mask]
-        ax_update.plot(
-            step_clock,
-            update_ms,
-            marker=".",
-            markersize=2.5,
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-    ax_step.set_ylabel("Per fixed tick [ms]")
-    ax_step.set_xlim(0.0, scenario.horizon)
-    ax_step.grid(True, alpha=0.20)
-    if should_add_method_legend(results):
-        add_series_legend(ax_step)
-    ax_update.set_xlabel("Time [s]")
-    ax_update.set_ylabel("Per controller update [ms]")
-    ax_update.set_xlim(0.0, scenario.horizon)
-    if any(
-        np.any(
-            (1000.0 * np.asarray(result["step_compute_times"], dtype=float))[
-                np.asarray(result["event_flags"], dtype=bool)
-            ]
-            > 0.0
-        )
-        for result in results
-        if np.asarray(result["step_compute_times"], dtype=float).size
-    ):
-        ax_update.set_yscale("log")
-    ax_update.grid(True, alpha=0.20)
-    save_paper_figure(fig, out_dir / "fig_computation_time.pdf")
-
-    fig, ax = new_paper_figure()
-    for result in results:
-        cumulative = np.cumsum(np.asarray(result["step_compute_times"], dtype=float))
-        step_clock = np.asarray(result.get("step_times", result["control_times"]), dtype=float)
-        if cumulative.size == 0 or step_clock.size == 0:
-            continue
-        ax.plot(
-            step_clock,
-            cumulative,
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Cumulative controller compute time [s]")
-    ax.set_xlim(0.0, scenario.horizon)
-    ax.grid(True, alpha=0.20)
-    if should_add_method_legend(results):
-        add_series_legend(ax)
-    save_paper_figure(fig, out_dir / "fig_cumulative_computation_time.pdf")
-
-    fig, ax = new_paper_figure(figsize=(SINGLE_COLUMN_WIDTH, 2.0))
-    labels = [str(result["label"]) for result in results]
-    real_time_factors = [
-        float(timing_metrics(result, scenario)["controller_real_time_factor"])
-        for result in results
-    ]
-    positions = np.arange(len(results))
-    for position, result, value in zip(positions, results, real_time_factors):
-        if not math.isfinite(value) or value <= 0.0:
-            continue
-        color = method_color(result)
-        value_label = f"{value:.2f}" if value < 1.0 else f"{value:.0f}"
-        ax.hlines(
-            position,
-            min(1.0, value),
-            max(1.0, value),
-            color=color,
-            linestyle=method_linestyle(result),
-            linewidth=method_linewidth(result)*1.2,
-            alpha=0.75,
-            zorder=method_zorder(result),
-        )
-        ax.scatter(
-            [value],
-            [position],
-            color=color,
-            s=MISC_MARKER_SIZE,
-            zorder=method_zorder(result),
-        )
-        if value >= 1.0:
-            text_x = value * 1.15
-            text_y = position
-        else:
-            text_x = value
-            text_y = position + 0.6
-        ax.text(
-            text_x,
-            text_y,
-            value_label,
-            va="center",
-            ha="left" if value >= 1.0 else "center",
-        )
-    ax.axvline(
-        1.0,
-        color="black",
-        linewidth=REFERENCE_LINEWIDTH,
-        linestyle="--",
-        label="_nolegend_",
-    )
-    ax.annotate(
-        "Threshold",
-        xy=(1.0, 1.01),
-        xycoords=ax.get_xaxis_transform(),
-        xytext=(0.0, 0.0),
-        textcoords="offset points",
-        ha="center",
-        va="bottom",
-        color="black",
-        clip_on=False,
-    )
-    ax.set_yticks(positions)
-    ax.set_yticklabels(labels)
-    ax.invert_yaxis()
-    ax.set_xlabel("Real-time factor [simulated s / controller CPU s]")
-    ax.set_xscale("log")
-    ax.set_xlim(5.0e-1, 1.0e3)
-    ax.grid(True, axis="x", alpha=0.25)
-    save_paper_figure(fig, out_dir / "fig_real_time_factor.pdf")
-
-    plot_series(
-        results,
-        "goal_distance",
-        "distance to goal [m]",
-        out_dir / "fig_distance_to_goal.pdf",
-        scenario=scenario,
-    )
-
     plot_taylor_residuals(results, scenario, out_dir / "fig_taylor_residuals.pdf")
 
     save_trajectory_plot(results, scenario, out_dir)
-
-    fig, ax = new_paper_figure()
-    has_tau = False
-    for result in results:
-        tau_values = np.asarray(result["tau_values"], dtype=float)
-        finite_mask = np.isfinite(tau_values)
-        if np.any(finite_mask):
-            has_tau = True
-            control_times = np.asarray(result["control_times"], dtype=float)
-            step_times = np.append(control_times, result_stop_time(result))
-            step_values = np.append(tau_values, tau_values[-1])
-            ax.step(
-                step_times,
-                step_values,
-                where="post",
-                label=f"{result_legend_label(result, scenario)} " + r"$\tau$",
-                **method_plot_kwargs(result),
-            )
-            if result["method"] == "event_triggered_atlc":
-                update_mask = np.asarray(
-                    result.get("control_event_flags", result["event_flags"]),
-                    dtype=bool,
-                ) & finite_mask
-                ax.scatter(
-                    control_times[update_mask],
-                    tau_values[update_mask],
-                    color=method_color(result),
-                    s=MISC_MARKER_SIZE,
-                    zorder=4,
-                    label=r"aTLC $\tau$ updates",
-                )
-    if has_tau:
-        ax.set_xlabel("Time [s]")
-        ax.set_ylabel(r"Time-scale parameter $\tau$ [s]")
-        ax.set_xlim(0.0, scenario.horizon)
-        ax.grid(True, alpha=0.20)
-        if should_add_method_legend(results):
-            add_series_legend(ax)
-        save_paper_figure(fig, out_dir / "fig_time_scale_tau.pdf")
-        fig = None
-    if fig is not None:
-        plt.close(fig)
-
-    fig, ax = new_paper_figure()
-    has_eta = False
-    for result in results:
-        eta_values = result["eta_values"]
-        if np.any(np.isfinite(eta_values)):
-            has_eta = True
-            ax.plot(
-                result["control_times"],
-                eta_values,
-                label=result_legend_label(result, scenario),
-                **method_plot_kwargs(result),
-            )
-    if has_eta:
-        ax.set_xlabel("Time [s]")
-        ax.set_ylabel(r"Adaptive gain $\eta$")
-        ax.set_xlim(0.0, scenario.horizon)
-        ax.grid(True, alpha=0.20)
-        if should_add_method_legend(results):
-            add_series_legend(ax)
-        save_paper_figure(fig, out_dir / "fig_adaptive_eta.pdf")
-        fig = None
-    if fig is not None:
-        plt.close(fig)
-
-    event_styles = {
-        "event_triggered_tlc": METHOD_COLORS["event_triggered_tlc"],
-        "event_triggered_atlc": METHOD_COLORS["event_triggered_atlc"],
-    }
-    event_results = [result for result in results if str(result["method"]) in event_styles]
-    if event_results:
-        fig, ax = new_paper_figure(PLOT_EVENT_SIZE)
-        max_event: tuple[float, float] | None = None
-        has_event_intervals = False
-        for result in event_results:
-            method = str(result["method"])
-            update_mask = np.asarray(result["event_flags"], dtype=bool)
-            update_indices = np.flatnonzero(update_mask)
-            if update_indices.size == 0:
-                continue
-
-            update_times = np.asarray(result.get("step_times", result["control_times"]), dtype=float)[update_indices]
-            next_update_times = np.concatenate((update_times[1:], np.array([result_stop_time(result)])))
-            intervals = next_update_times - update_times
-            positive_intervals = intervals > 1.0e-12
-            update_times = update_times[positive_intervals]
-            intervals = intervals[positive_intervals]
-            if intervals.size == 0:
-                continue
-
-            local_max_index = int(np.argmax(intervals))
-            local_max = (float(update_times[local_max_index]), float(intervals[local_max_index]))
-            if max_event is None or local_max[1] > max_event[1]:
-                max_event = local_max
-
-            color = event_styles[method]
-            label = result_legend_label(result, scenario)
-            markerline, stemlines, baseline = ax.stem(
-                update_times,
-                intervals,
-                linefmt=color,
-                markerfmt="o",
-                basefmt=" ",
-            )
-            has_event_intervals = True
-            plt.setp(stemlines, linewidth=1.0, color=color)
-            plt.setp(
-                markerline,
-                markersize=3.6,
-                markerfacecolor=color,
-                markeredgecolor=color,
-                label=label,
-            )
-            baseline.set_visible(False)
-
-        if has_event_intervals:
-            y_upper = max(2.0 * scenario.dt, 1.15 * max_event[1]) if max_event else 2.0 * scenario.dt
-            ax.set_xlabel("Time [s]")
-            ax.set_ylabel(r"$\Delta t$ [s]")
-            ax.set_xlim(0.0, scenario.horizon)
-            ax.set_ylim(0.0, y_upper)
-            ax.grid(True, alpha=0.20)
-            if max_event is not None:
-                x_text = max_event[0] + 0.08 * scenario.horizon
-                if x_text > 0.72 * scenario.horizon:
-                    x_text = max(0.0, max_event[0] - 0.35 * scenario.horizon)
-                ax.annotate(
-                    rf"$\Delta t={max_event[1]:.2f}s$",
-                    xy=max_event,
-                    xytext=(x_text, 0.88 * y_upper),
-                    arrowprops={"arrowstyle": "->", "linewidth": 1.0, "color": "0.15"},
-                )
-            ax.legend(loc="upper right")
-            save_paper_figure(fig, out_dir / "fig_event_compare.pdf")
-            fig = None
-        if fig is not None:
-            plt.close(fig)
-
-    fig, ax = new_paper_figure()
-    for result in results:
-        ax.step(
-            result.get("step_times", result["control_times"]),
-            np.asarray(result["event_flags"], dtype=float),
-            where="post",
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("QP/event solve flag")
-    ax.set_xlim(0.0, scenario.horizon)
-    ax.set_ylim(-0.05, 1.05)
-    ax.grid(True, alpha=0.20)
-    if should_add_method_legend(results):
-        add_series_legend(ax)
-    save_paper_figure(fig, out_dir / "fig_qp_solve_events.pdf")
 
 
 def save_summary(
@@ -4485,9 +3717,6 @@ def save_summary(
             if isinstance(value, np.ndarray)
         },
     )
-
-    save_status_counts(results, out_dir)
-    save_ttcbremainder_comparison(results, scenario, out_dir)
 
 
 def inclusive_negative_grid(end: float, step: float, name: str) -> tuple[float, ...]:
@@ -4679,23 +3908,18 @@ def grid_sweep_method_summary_rows(rows: list[dict[str, object]]) -> list[dict[s
     return summary_rows
 
 
-def save_trajectory_plot(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    scenario: Scenario,
-    out_dir: Path,
-) -> None:
-    """Save only the XY trajectory figure (fig_xy_trajectories.pdf) for grid sweeps."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+def new_trajectory_figure(scenario: Scenario) -> tuple[plt.Figure, plt.Axes]:
     fig, ax = new_paper_figure(PLOT_TRAJECTORY_SIZE, constrained_layout=False)
-    obstacle = plt.Circle(
-        scenario.obstacle,
-        scenario.safe_radius,
-        edgecolor="tab:red",
-        facecolor=to_rgba("tab:red", 0.4),
-        linestyle="-",
-        linewidth=0.5,
-        zorder=0,
+    ax.add_patch(
+        plt.Circle(
+            scenario.obstacle,
+            scenario.safe_radius,
+            edgecolor="tab:red",
+            facecolor=to_rgba("tab:red", 0.4),
+            linestyle="-",
+            linewidth=0.5,
+            zorder=0,
+        )
     )
     ax.scatter(
         [scenario.start[0]],
@@ -4735,18 +3959,6 @@ def save_trajectory_plot(
         ha="center",
         va="top",
     )
-    trajectory_lines = []
-    for result in results:
-        states = result["states"]
-        (line,) = ax.plot(
-            states[:, 0],
-            states[:, 1],
-            label=result_legend_label(result, scenario),
-            **method_plot_kwargs(result),
-        )
-        trajectory_lines.append(line)
-        draw_trajectory_status_markers(ax, result, scenario)
-    ax.add_patch(obstacle)
     ax.text(
         scenario.obstacle[0],
         scenario.obstacle[1],
@@ -4761,6 +3973,14 @@ def save_trajectory_plot(
     ax.set_xlabel(r"$x$ [m]")
     ax.set_ylabel(r"$y$ [m]")
     ax.grid(True, alpha=0.20)
+    return fig, ax
+
+
+def add_trajectory_legend(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    results: list[dict[str, np.ndarray | str | int | float]],
+) -> None:
     method_handles, method_labels = ax.get_legend_handles_labels()
     if method_handles and should_add_method_legend(results):
         fig.legend(
@@ -4773,6 +3993,9 @@ def save_trajectory_plot(
             columnspacing=0.8,
             handlelength=1.8,
         )
+
+
+def add_trajectory_inset(ax: plt.Axes, scenario: Scenario) -> plt.Axes:
     axins = inset_axes(
         ax,
         width="48%",
@@ -4782,11 +4005,54 @@ def save_trajectory_plot(
         bbox_transform=ax.transAxes,
         borderpad=0.0,
     )
+    axins.add_patch(
+        plt.Circle(
+            scenario.obstacle,
+            scenario.safe_radius,
+            edgecolor="tab:red",
+            facecolor=to_rgba("tab:red", 0.4),
+            linestyle="-",
+            linewidth=0.5,
+            zorder=0,
+        )
+    )
+    axins.set_xlim(3.7, 5.5)
+    axins.set_ylim(-1.5, -0.6)
+    axins.set_aspect("equal")
+    axins.set_xticks([4.0, 5.0])
+    axins.set_yticks([-1.4, -1.2, -1.0, -0.8, -0.6])
+    axins.tick_params(axis="both", labelsize=5.5, length=1.8, pad=1.0)
+    mark_inset(ax, axins, loc1=1, loc2=3, fc="none", ec="0.5")
+    return axins
+
+
+def save_trajectory_plot(
+    results: list[dict[str, np.ndarray | str | int | float]],
+    scenario: Scenario,
+    out_dir: Path,
+) -> None:
+    """Save the XY trajectory figure used by standard runs and grid sweeps."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = new_trajectory_figure(scenario)
+    trajectory_lines = []
+    for result in results:
+        states = np.asarray(result["states"], dtype=float)
+        (line,) = ax.plot(
+            states[:, 0],
+            states[:, 1],
+            label=result_legend_label(result, scenario),
+            **method_plot_kwargs(result),
+        )
+        trajectory_lines.append(line)
+        draw_trajectory_status_markers(ax, result, scenario)
+    add_trajectory_legend(fig, ax, results)
+
+    axins = add_trajectory_inset(ax, scenario)
     for line in trajectory_lines:
-        line_states = np.column_stack((line.get_xdata(), line.get_ydata()))
         axins.plot(
-            line_states[:, 0],
-            line_states[:, 1],
+            line.get_xdata(),
+            line.get_ydata(),
             color=line.get_color(),
             linestyle=line.get_linestyle(),
             linewidth=line.get_linewidth(),
@@ -4794,28 +4060,204 @@ def save_trajectory_plot(
         )
     for result in results:
         draw_trajectory_status_markers(axins, result, scenario)
-    zoom_obstacle = plt.Circle(
-        scenario.obstacle,
-        scenario.safe_radius,
-        edgecolor="tab:red",
-        facecolor=to_rgba("tab:red", 0.4),
-        linestyle="-",
-        linewidth=0.5,
-        zorder=0,
-    )
-    axins.add_patch(zoom_obstacle)
-    axins.set_xlim(3.7, 5.5)
-    axins.set_ylim(-1.5, -0.6)
-    axins.set_aspect("equal")
-    axins.set_xticks([4.0, 5.0])
-    axins.set_yticks([-1.4, -1.2, -1.0, -0.8, -0.6])
-    axins.tick_params(axis="both", labelsize=5.5, length=1.8, pad=1.0)
     annotate_trajectory_event_points(
         axins,
         representative_trajectory_event_points(results, scenario),
     )
-    mark_inset(ax, axins, loc1=1, loc2=3, fc="none", ec="0.5")
     save_paper_figure(fig, out_dir / "fig_xy_trajectories.pdf")
+
+
+def hidden_trajectory_status_artists(
+    ax: plt.Axes,
+    result: dict[str, np.ndarray | str | int | float],
+    scenario: Scenario,
+) -> list[plt.Artist]:
+    existing_artists = set(ax.get_children())
+    draw_trajectory_status_markers(ax, result, scenario)
+    artists = [artist for artist in ax.get_children() if artist not in existing_artists]
+    for artist in artists:
+        artist.set_visible(False)
+    return artists
+
+
+def heading_marker_path(theta: float) -> MatplotlibPath:
+    marker = MatplotlibPath(
+        np.array(
+            [
+                [1.0, 0.0],
+                [-0.65, 0.55],
+                [-0.65, -0.55],
+                [1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        closed=True,
+    )
+    return marker.transformed(Affine2D().rotate(theta))
+
+
+def save_trajectory_video(
+    results: list[dict[str, np.ndarray | str | int | float]],
+    scenario: Scenario,
+    out_dir: Path,
+) -> Path:
+    """Animate fresh or cache-loaded trajectories and save an H.264 MP4."""
+    if not results:
+        raise ValueError("cannot export a trajectory video without simulation results")
+    if scenario.dt <= 0.0:
+        raise ValueError("Scenario.dt must be positive to export a trajectory video")
+    if not animation.writers.is_available("ffmpeg"):
+        raise RuntimeError(
+            "FFmpeg is required for --save-video. Install it with "
+            "'brew install ffmpeg' on macOS or 'sudo apt-get install ffmpeg' on Ubuntu."
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output = out_dir / "video_xy_trajectories.mp4"
+    fig, ax = new_trajectory_figure(scenario)
+    if not should_add_method_legend(results):
+        fig.set_size_inches(*PLOT_TRAJECTORY_VIDEO_SIZE)
+
+    main_lines: list[Line2D] = []
+    inset_lines: list[Line2D] = []
+    main_vehicles: list[Line2D] = []
+    inset_vehicles: list[Line2D] = []
+    status_artists: list[list[plt.Artist]] = []
+    result_states: list[np.ndarray] = []
+    result_times: list[np.ndarray] = []
+
+    for result in results:
+        states = np.asarray(result["states"], dtype=float)
+        times = np.asarray(result["times"], dtype=float)
+        n_values = min(states.shape[0], times.size)
+        if n_values == 0:
+            raise ValueError(f"{result['method']} has no trajectory samples")
+        states = states[:n_values]
+        times = times[:n_values]
+        result_states.append(states)
+        result_times.append(times)
+
+        (line,) = ax.plot(
+            [],
+            [],
+            label=result_legend_label(result, scenario),
+            **method_plot_kwargs(result),
+        )
+        main_lines.append(line)
+        color = method_color(result)
+        (vehicle,) = ax.plot(
+            [],
+            [],
+            linestyle="None",
+            marker=heading_marker_path(float(states[0, 2])),
+            markersize=VIDEO_VEHICLE_MARKER_SIZE,
+            markerfacecolor=color,
+            markeredgecolor=color,
+            markeredgewidth=0.4,
+            zorder=35,
+            label="_nolegend_",
+        )
+        main_vehicles.append(vehicle)
+        status_artists.append(hidden_trajectory_status_artists(ax, result, scenario))
+
+    add_trajectory_legend(fig, ax, results)
+    axins = add_trajectory_inset(ax, scenario)
+    for result, states in zip(results, result_states, strict=True):
+        (line,) = axins.plot([], [], **method_plot_kwargs(result))
+        inset_lines.append(line)
+        color = method_color(result)
+        (vehicle,) = axins.plot(
+            [],
+            [],
+            linestyle="None",
+            marker=heading_marker_path(float(states[0, 2])),
+            markersize=VIDEO_VEHICLE_MARKER_SIZE,
+            markerfacecolor=color,
+            markeredgecolor=color,
+            markeredgewidth=0.4,
+            zorder=35,
+            label="_nolegend_",
+        )
+        inset_vehicles.append(vehicle)
+
+    inset_status_artists = [
+        hidden_trajectory_status_artists(axins, result, scenario)
+        for result in results
+    ]
+    event_data = representative_trajectory_events(results, scenario)
+    annotations = annotate_trajectory_event_points(
+        axins,
+        {label: point for label, (point, _) in event_data.items()},
+    )
+    for annotation in annotations.values():
+        annotation.set_visible(False)
+
+    max_time = max(float(times[-1]) for times in result_times)
+    frame_times = np.arange(0.0, max_time + 0.5 * scenario.dt, scenario.dt)
+    final_hold_frames = max(1, int(round(VIDEO_FINAL_HOLD_SECONDS / scenario.dt)))
+    frame_times = np.concatenate(
+        (frame_times, np.full(final_hold_frames, max_time, dtype=float))
+    )
+
+    all_status_artists = [
+        *[artist for group in status_artists for artist in group],
+        *[artist for group in inset_status_artists for artist in group],
+    ]
+    animated_artists: list[plt.Artist] = [
+        *main_lines,
+        *inset_lines,
+        *main_vehicles,
+        *inset_vehicles,
+        *all_status_artists,
+        *annotations.values(),
+    ]
+
+    def update(frame_time: float) -> list[plt.Artist]:
+        for index, (result, states, times) in enumerate(
+            zip(results, result_states, result_times, strict=True)
+        ):
+            state_index = int(np.searchsorted(times, frame_time, side="right") - 1)
+            state_index = max(0, min(state_index, states.shape[0] - 1))
+            visible_states = states[: state_index + 1]
+            for line in (main_lines[index], inset_lines[index]):
+                line.set_data(visible_states[:, 0], visible_states[:, 1])
+
+            current_state = states[state_index]
+            marker = heading_marker_path(float(current_state[2]))
+            for vehicle in (main_vehicles[index], inset_vehicles[index]):
+                vehicle.set_data([current_state[0]], [current_state[1]])
+                vehicle.set_marker(marker)
+
+            show_status = frame_time >= result_stop_time(result) - 0.5 * scenario.dt
+            for artist in (*status_artists[index], *inset_status_artists[index]):
+                artist.set_visible(show_status)
+
+        for label, annotation in annotations.items():
+            annotation.set_visible(
+                frame_time >= event_data[label][1] - 0.5 * scenario.dt
+            )
+        return animated_artists
+
+    trajectory_animation = animation.FuncAnimation(
+        fig,
+        update,
+        frames=frame_times,
+        interval=1000.0 * scenario.dt,
+        blit=False,
+        repeat=False,
+    )
+    writer = animation.FFMpegWriter(
+        fps=1.0 / scenario.dt,
+        codec="libx264",
+        bitrate=2400,
+        metadata={"title": "TTCBF trajectory comparison"},
+        extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    )
+    try:
+        trajectory_animation.save(output, writer=writer, dpi=VIDEO_DPI)
+    finally:
+        plt.close(fig)
+    return output
 
 
 def run_grid_sweep(args: argparse.Namespace, base_scenario: Scenario, out_dir: Path) -> None:
@@ -4938,109 +4380,6 @@ def run_grid_sweep(args: argparse.Namespace, base_scenario: Scenario, out_dir: P
     print(f"\nGrid sweep complete in {elapsed_s:.1f}s.")
     print(f"Wrote rollout statistics to: {rollout_path.resolve()}")
     print(f"Wrote method summary to: {summary_path.resolve()}")
-
-
-def save_status_counts(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    out_dir: Path,
-) -> None:
-    for filename, key in (
-        ("step_status_counts.csv", "step_statuses"),
-        ("qp_status_counts.csv", "qp_call_statuses"),
-    ):
-        rows = []
-        for result in results:
-            for status, count in status_counts(np.asarray(result[key])).items():
-                rows.append(
-                    {
-                        "method": result["method"],
-                        "label": result["label"],
-                        "status": status,
-                        "count": count,
-                    }
-                )
-        with (out_dir / filename).open("w", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=["method", "label", "status", "count"])
-            writer.writeheader()
-            writer.writerows(rows)
-
-
-def finite_stats(values: np.ndarray) -> dict[str, float]:
-    arr = np.asarray(values, dtype=float)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return {
-            "min": math.nan,
-            "mean": math.nan,
-            "max": math.nan,
-            "mean_abs": math.nan,
-            "max_abs": math.nan,
-        }
-    return {
-        "min": float(np.min(finite)),
-        "mean": float(np.mean(finite)),
-        "max": float(np.max(finite)),
-        "mean_abs": float(np.mean(np.abs(finite))),
-        "max_abs": float(np.max(np.abs(finite))),
-    }
-
-
-def save_ttcbremainder_comparison(
-    results: list[dict[str, np.ndarray | str | int | float]],
-    scenario: Scenario,
-    out_dir: Path,
-) -> None:
-    rows = []
-    for result in results:
-        if "ttcbf_remainder_estimate" not in result:
-            continue
-        metrics = timing_metrics(result, scenario)
-        remainder_stats = finite_stats(np.asarray(result["ttcbf_remainder_estimate"], dtype=float))
-        h3_stats = finite_stats(np.asarray(result["ttcbf_hthird_lower_bound"], dtype=float))
-        controls = np.asarray(result["controls"], dtype=float)
-        states = np.asarray(result["states"], dtype=float)
-        rows.append(
-            {
-                "method": result["method"],
-                "label": result["label"],
-                "stop_reason": result_stop_reason(result),
-                "stop_time_s": result_stop_time(result),
-                "min_h": float(np.min(result["h_values"])),
-                "min_clearance_m": float(np.min(result["clearance_values"])),
-                "num_infeasible": int(result["num_infeasible"]),
-                "mean_speed_mps": column_mean_or_nan(states[:, 3]),
-                "mean_abs_steering_rate": (
-                    column_mean_or_nan(np.abs(controls[:, 0]))
-                    if controls.shape[0]
-                    else math.nan
-                ),
-                "mean_abs_acceleration": (
-                    column_mean_or_nan(np.abs(controls[:, 1]))
-                    if controls.shape[0]
-                    else math.nan
-                ),
-                "remainder_min": remainder_stats["min"],
-                "remainder_mean": remainder_stats["mean"],
-                "remainder_max": remainder_stats["max"],
-                "remainder_mean_abs": remainder_stats["mean_abs"],
-                "remainder_max_abs": remainder_stats["max_abs"],
-                "hthird_lower_min": h3_stats["min"],
-                "hthird_lower_mean": h3_stats["mean"],
-                "hthird_lower_max": h3_stats["max"],
-                "controller_real_time_factor": float(metrics["controller_real_time_factor"]),
-                "mean_step_compute_ms": float(metrics["mean_step_compute_ms"]),
-                "mean_update_compute_ms": float(metrics["mean_update_compute_ms"]),
-                "mean_qp_call_compute_ms": float(metrics["mean_qp_call_compute_ms"]),
-                "total_controller_compute_s": float(metrics["total_controller_compute_s"]),
-            }
-        )
-    if not rows:
-        return
-
-    with (out_dir / "ttcbf_remainder_comparison.csv").open("w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def print_summary(
@@ -5172,6 +4511,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--save-video",
+        action="store_true",
+        default=False,
+        help=(
+            "export video_xy_trajectories.mp4 after a single-scenario run; "
+            "supports fresh, cached, and mixed results"
+        ),
+    )
+    parser.add_argument(
         "--is-auto-sweep",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -5271,6 +4619,8 @@ def parse_args() -> argparse.Namespace:
             args.methods = parse_methods_argument(args.methods)
         except ValueError as exc:
             parser.error(str(exc))
+    if args.grid_sweep and args.save_video:
+        parser.error("--save-video is only supported for single-scenario runs")
     if args.grid_sweep:
         try:
             inclusive_negative_grid(args.accel_min_end, args.accel_min_step, "accel_min")
@@ -5350,14 +4700,8 @@ def main() -> None:
 
     save_summary(results, scenario, out_dir)
     save_all_methods_legend(results, scenario, out_dir)
-    save_performance_radar_chart(results, scenario, out_dir)
     save_composite_results_plot(results, scenario, out_dir)
     for group_subdir, group_methods in PLOT_GROUPS:
-        
-        # Remove this continue if you want to generate plots for all groups
-        if group_subdir is not None:
-            continue
-        
         group_out_dir = out_dir if group_subdir is None else out_dir / group_subdir
         group_results = [
             results_by_method[method]
@@ -5367,6 +4711,12 @@ def main() -> None:
         if not group_results:
             continue
         save_plots(group_results, scenario, group_out_dir)
+    if args.save_video:
+        try:
+            video_path = save_trajectory_video(results, scenario, out_dir)
+        except (RuntimeError, ValueError) as exc:
+            raise SystemExit(f"error: {exc}") from exc
+        print(f"Wrote trajectory video to: {video_path.resolve()}")
     print_summary(results, scenario)
     print_timing_interpretation(results, scenario)
     print(f"\nWrote plots and logs to: {out_dir.resolve()}")
