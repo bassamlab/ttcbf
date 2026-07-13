@@ -73,24 +73,26 @@ This evaluates 20 braking bounds and 20 negative yaw-rate bounds, for 2,400 roll
 
 ## Number of tuning parameters
 
-The manuscript counts user-chosen safety-constraint parameters, auxiliary dynamics parameters, and associated QP weights. Goal-oriented CLF parameters are excluded.
+The manuscript reports the number of method-specific configurable fields used by this implementation. Each scalar field, tuple/vector field, or explicit candidate-set field listed in `TUNING_PARAMETER_FIELDS` counts once; in particular, a state-bound vector or a set of candidate prediction intervals is counted as one field rather than by its number of scalar entries. The count includes safety-constraint settings, auxiliary-dynamics initial conditions, targets, bounds and gains, associated QP cost coefficients, and configurable approximation or discretization settings.
+
+Shared task and plant/model data (including the sampling period, control bounds, and externally specified control-rate bounds), goal-oriented nominal-controller and CLF settings, solver tolerances, and hard-coded numerical constants are excluded. Method-specific positivity floors and margins are included because they directly affect the safety or auxiliary constraints.
 
 | Method | Count | Justification |
 | --- | ---: | --- |
-| TTCBF (our) | **1** | One class-K coefficient |
-| aTTCBF (our) | **1** | One adaptive-gain penalty weight |
-| DT-HOCBF | 2 | Two discrete-time class-K coefficients |
-| aDT-HOCBF | 11 | Adaptive discrete-time gains and auxiliary dynamics |
-| CT-HOCBF | 2 | Two class-K coefficients |
-| PACBF | 9 | Base gains, penalty dynamics, targets, and QP weights |
-| RACBF | 11 | Base gains, relaxation dynamics, targets, and QP weights |
-| AVCBF | 9 | Base gains, auxiliary-variable dynamics, and QP weights |
-| ZOH-TLC | 1 | Taylor time step |
-| rTLC | 1 | Taylor time step |
-| ET-TLC | 3 | Time step and event-triggering state bounds |
-| ET-aTLC | 4 | Time-scale bounds, look-ahead horizon, and state bounds |
+| TTCBF (our) | **1** | One class-K coefficient, `ttcbf_alpha`; the derived prediction interval `2 * dt` and external control-rate bounds are excluded |
+| aTTCBF (our) | **1** | One QP penalty weight, `attcbf_eta_weight`, on the adaptive gain; the derived prediction interval and external control-rate bounds are excluded |
+| DT-HOCBF | 2 | Two discrete-time HOCBF coefficients, `gamma1` and `gamma2` |
+| aDT-HOCBF | 11 | One initial gain, two desired gains, two gain bounds, two auxiliary bound-CBF gains, one auxiliary-gain CLF rate, and three QP cost weights |
+| CT-HOCBF | 2 | Two class-K coefficients, `p1` and `p2`, in the relative-degree-two HOCBF recursion |
+| PACBF | 9 | One initial gain, two gain targets, one auxiliary-gain CLF rate, four QP cost coefficients, and one positivity floor |
+| RACBF | 11 | Four barrier/relaxation-chain gains, two relaxation-state initial values, one target, one lower bound, one auxiliary-state CLF rate, and two QP cost weights |
+| AVCBF | 9 | Four barrier/auxiliary-chain gains, two auxiliary-state initial values, one auxiliary-input target, one QP cost weight, and one positivity margin |
+| ZOH-TLC | 1 | One Taylor prediction interval, `zoh_tlc_tau` |
+| rTLC | 1 | One Taylor prediction interval, `rtlc_tau`; external control-rate bounds and the hard-coded sampling resolution are excluded |
+| ET-TLC | 3 | One Taylor prediction interval, one four-dimensional event-box half-width vector, and one samples-per-dimension setting |
+| ET-aTLC | 4 | One explicit candidate-interval set, one rollout look-ahead horizon, one four-dimensional event-box half-width vector, and one samples-per-dimension setting |
 
-TTCBF and aTTCBF retain one tuning parameter independently of the safety constraint's relative degree. Recursive-chain-based methods require additional class-K functions as the relative degree increases. All adaptive methods, except for our aTTCBF, requre more tuning parameters compared to their nonadaptive counterparts.
+Under this counting convention, TTCBF and aTTCBF retain one tuning parameter independently of the safety constraint's relative degree. Recursive-chain-based methods require additional class-K functions as the relative degree increases. All adaptive methods, except for our aTTCBF, require more tuning parameters compared to their nonadaptive counterparts.
 
 
 ## Notes
