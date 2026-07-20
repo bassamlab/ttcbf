@@ -47,9 +47,9 @@ Run all 12 methods with the default control bounds:
 python main.py
 ```
 
-Results are written to `eval_results_accel_min-1/`. Under these bounds, TTCBF, aTTCBF, all recursive-chain baselines, and ET-aTLC reach the goal. ZOH-TLC, rTLC, and ET-TLC terminate because their QPs become infeasible.
+Results are written to `eval_results_accel_min-1/`. Under these bounds, TTCBF, aTTCBF, all recursive-chain baselines, and ET-aTLC reach the goal. ZOH-TLC, rTLC, and ET-TLC terminate because their QPs become infeasible:
 
-<!-- TODO: Add figure eval_results_accel_min-1.5/fig_xy_trajectories.pdf -->
+![Vehicle trajectories under the default control bounds](video_xy_trajectories_default_control_bound.gif)
 
 ### 2. Enlarged control bound
 
@@ -60,6 +60,9 @@ python main.py --accel-min -1.5
 ```
 
 The default output directory is `eval_results_accel_min-1.5/`.
+With the enlarged braking bound of `-1.5 m/s^2`, rTLC and ET-TLC become feasible and reach the goal, while ZOH-TLC collides because it lacks a class K function that regulates the barrier decay rate:
+
+![Vehicle trajectories under the enlarged control bounds](video_xy_trajectories_enlarged_control_bound.gif)
 
 ### 3. Tightened control bounds
 
